@@ -22,7 +22,6 @@ import (
 	"strconv"
 
 	"github.com/go-openapi/strfmt"
-	"github.com/google/uuid"
 	"github.com/pkg/errors"
 	"github.com/weaviate/weaviate/adapters/repos/db"
 	"github.com/weaviate/weaviate/entities/additional"
@@ -38,24 +37,24 @@ import (
 )
 
 type indices struct {
-	shards                     shards
-	db                         *db.DB
-	auth                       auth
-	regexpObjects              *regexp.Regexp
-	regexpObjectsOverwrite     *regexp.Regexp
-	regexObjectsDigest         *regexp.Regexp
-	regexObjectsDigestsInRange *regexp.Regexp
-	regexObjectsHashTreeLevel  *regexp.Regexp
-	regexpObjectsSearch        *regexp.Regexp
-	regexpObjectsFind          *regexp.Regexp
-	regexpObjectsAggregations  *regexp.Regexp
-	regexpObject               *regexp.Regexp
-	regexpReferences           *regexp.Regexp
-	regexpShardsQueueSize      *regexp.Regexp
-	regexpShardsStatus         *regexp.Regexp
-	regexpShardFiles           *regexp.Regexp
-	regexpShard                *regexp.Regexp
-	regexpShardReinit          *regexp.Regexp
+	shards                          shards
+	db                              *db.DB
+	auth                            auth
+	regexpObjects                   *regexp.Regexp
+	regexpObjectsOverwrite          *regexp.Regexp
+	regexObjectsDigest              *regexp.Regexp
+	regexObjectsDigestsInTokenRange *regexp.Regexp
+	regexObjectsHashTreeLevel       *regexp.Regexp
+	regexpObjectsSearch             *regexp.Regexp
+	regexpObjectsFind               *regexp.Regexp
+	regexpObjectsAggregations       *regexp.Regexp
+	regexpObject                    *regexp.Regexp
+	regexpReferences                *regexp.Regexp
+	regexpShardsQueueSize           *regexp.Regexp
+	regexpShardsStatus              *regexp.Regexp
+	regexpShardFiles                *regexp.Regexp
+	regexpShard                     *regexp.Regexp
+	regexpShardReinit               *regexp.Regexp
 }
 
 const (
@@ -70,8 +69,8 @@ const (
 		`\/shards\/(` + sh + `)\/objects:overwrite`
 	urlPatternObjectsDigest = `\/indices\/(` + cl + `)` +
 		`\/shards\/(` + sh + `)\/objects:digest`
-	urlPatternObjectsDigestsInRange = `\/indices\/(` + cl + `)` +
-		`\/shards\/(` + sh + `)\/objects:digestsInRange`
+	urlPatternObjectsDigestsInTokenRange = `\/indices\/(` + cl + `)` +
+		`\/shards\/(` + sh + `)\/objects:digestsInTokenRange`
 	urlPatternHashTreeLevel = `\/indices\/(` + cl + `)` +
 		`\/shards\/(` + sh + `)\/objects\/hashtree\/(` + l + `)`
 	urlPatternObjectsSearch = `\/indices\/(` + cl + `)` +
@@ -136,8 +135,8 @@ type shards interface {
 		vobjects []*objects.VObject) ([]replica.RepairResponse, error)
 	DigestObjects(ctx context.Context, indexName, shardName string,
 		ids []strfmt.UUID) (result []replica.RepairResponse, err error)
-	DigestObjectsInRange(ctx context.Context, indexName, shardName string,
-		initialUUID, finalUUID uuid.UUID, limit int) (result []replica.RepairResponse, err error)
+	DigestObjectsInTokenRange(ctx context.Context, indexName, shardName string,
+		initialToken, finalToken uint64, limit int) (result []replica.RepairResponse, lastTokenRead uint64, err error)
 	HashTreeLevel(ctx context.Context, indexName, shardName string,
 		level int, discriminant *hashtree.Bitset) (digests []hashtree.Digest, err error)
 
@@ -150,13 +149,13 @@ type shards interface {
 
 func NewIndices(shards shards, db *db.DB, auth auth) *indices {
 	return &indices{
-		regexpObjects:              regexp.MustCompile(urlPatternObjects),
-		regexpObjectsOverwrite:     regexp.MustCompile(urlPatternObjectsOverwrite),
-		regexObjectsDigest:         regexp.MustCompile(urlPatternObjectsDigest),
-		regexObjectsDigestsInRange: regexp.MustCompile(urlPatternObjectsDigestsInRange),
-		regexObjectsHashTreeLevel:  regexp.MustCompile(urlPatternHashTreeLevel),
-		regexpObjectsSearch:        regexp.MustCompile(urlPatternObjectsSearch),
-		regexpObjectsFind:          regexp.MustCompile(urlPatternObjectsFind),
+		regexpObjects:                   regexp.MustCompile(urlPatternObjects),
+		regexpObjectsOverwrite:          regexp.MustCompile(urlPatternObjectsOverwrite),
+		regexObjectsDigest:              regexp.MustCompile(urlPatternObjectsDigest),
+		regexObjectsDigestsInTokenRange: regexp.MustCompile(urlPatternObjectsDigestsInTokenRange),
+		regexObjectsHashTreeLevel:       regexp.MustCompile(urlPatternHashTreeLevel),
+		regexpObjectsSearch:             regexp.MustCompile(urlPatternObjectsSearch),
+		regexpObjectsFind:               regexp.MustCompile(urlPatternObjectsFind),
 
 		regexpObjectsAggregations: regexp.MustCompile(urlPatternObjectsAggregations),
 		regexpObject:              regexp.MustCompile(urlPatternObject),
@@ -216,12 +215,12 @@ func (i *indices) indicesHandler() http.HandlerFunc {
 			}
 
 			i.getObjectsDigest().ServeHTTP(w, r)
-		case i.regexObjectsDigestsInRange.MatchString(path):
+		case i.regexObjectsDigestsInTokenRange.MatchString(path):
 			if r.Method != http.MethodGet {
 				http.Error(w, "405 Method not Allowed", http.StatusMethodNotAllowed)
 			}
 
-			i.getObjectsDigest().ServeHTTP(w, r)
+			i.getObjectsDigestsInTokenRange().ServeHTTP(w, r)
 		case i.regexObjectsHashTreeLevel.MatchString(path):
 			if r.Method != http.MethodGet {
 				http.Error(w, "405 Method not Allowed", http.StatusMethodNotAllowed)
@@ -922,9 +921,9 @@ func (i *indices) getObjectsDigest() http.Handler {
 	})
 }
 
-func (i *indices) getObjectsDigestsInRange() http.Handler {
+func (i *indices) getObjectsDigestsInTokenRange() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		args := i.regexObjectsDigestsInRange.FindStringSubmatch(r.URL.Path)
+		args := i.regexObjectsDigestsInTokenRange.FindStringSubmatch(r.URL.Path)
 		if len(args) != 3 {
 			http.Error(w, "invalid URI", http.StatusBadRequest)
 			return
@@ -939,25 +938,25 @@ func (i *indices) getObjectsDigestsInRange() http.Handler {
 			return
 		}
 
-		var objRange replica.ObjectRange
-		if err := json.Unmarshal(reqPayload, &objRange); err != nil {
-			http.Error(w, "unmarshal digest objects in range params from json: "+err.Error(),
+		var tokenRangeReq replica.DigestObjectsInTokenRangeReq
+		if err := json.Unmarshal(reqPayload, &tokenRangeReq); err != nil {
+			http.Error(w, "unmarshal digest objects in token range params from json: "+err.Error(),
 				http.StatusBadRequest)
 			return
 		}
 
-		initialUUID := uuid.MustParse(objRange.InitialUUID.String())
-		finalUUID := uuid.MustParse(objRange.FinalUUID.String())
-
-		results, err := i.shards.DigestObjectsInRange(r.Context(),
-			index, shard, initialUUID, finalUUID, objRange.Limit)
+		digests, lastTokenRead, err := i.shards.DigestObjectsInTokenRange(r.Context(),
+			index, shard, tokenRangeReq.InitialToken, tokenRangeReq.FinalToken, tokenRangeReq.Limit)
 		if err != nil {
 			http.Error(w, "digest objects in range: "+err.Error(),
 				http.StatusInternalServerError)
 			return
 		}
 
-		resBytes, err := json.Marshal(results)
+		resBytes, err := json.Marshal(replica.DigestObjectsInTokenRangeResp{
+			Digests:       digests,
+			LastTokenRead: lastTokenRead,
+		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

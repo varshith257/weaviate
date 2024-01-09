@@ -13,6 +13,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -20,7 +21,6 @@ import (
 	"path/filepath"
 
 	"github.com/go-openapi/strfmt"
-	"github.com/google/uuid"
 	"github.com/weaviate/weaviate/entities/additional"
 	"github.com/weaviate/weaviate/entities/multi"
 	"github.com/weaviate/weaviate/entities/schema"
@@ -414,17 +414,17 @@ func (i *Index) IncomingDigestObjects(ctx context.Context,
 	return i.DigestObjects(ctx, shardName, ids)
 }
 
-func (i *Index) DigestObjectsInRange(ctx context.Context,
-	shardName string, initialUUID, finalUUID uuid.UUID, limit int,
-) (result []replica.RepairResponse, err error) {
+func (i *Index) DigestObjectsInTokenRange(ctx context.Context,
+	shardName string, initialToken, finalToken uint64, limit int,
+) (result []replica.RepairResponse, lastTokenRead uint64, err error) {
 	s, err := i.getOrInitLocalShard(ctx, shardName)
 	if err != nil {
-		return nil, fmt.Errorf("shard %q not found locally", shardName)
+		return nil, 0, fmt.Errorf("shard %q not found locally", shardName)
 	}
 
-	objs, err := s.MultiObjectByIDInRange(ctx, initialUUID, finalUUID, limit)
-	if err != nil {
-		return nil, fmt.Errorf("shard objects digest in range: %w", err)
+	objs, lastTokenRead, err := s.MultiObjectByTokenRange(ctx, initialToken, finalToken, limit)
+	if err != nil && !errors.Is(err, storobj.ErrLimitReached) {
+		return nil, 0, fmt.Errorf("shard objects digest in token range: %w", err)
 	}
 
 	result = make([]replica.RepairResponse, len(objs))
@@ -438,13 +438,13 @@ func (i *Index) DigestObjectsInRange(ctx context.Context,
 		}
 	}
 
-	return result, nil
+	return result, lastTokenRead, err
 }
 
-func (i *Index) IncomingDigestObjectsInRange(ctx context.Context,
-	shardName string, initialUUID, finalUUID uuid.UUID, limit int,
-) (result []replica.RepairResponse, err error) {
-	return i.DigestObjectsInRange(ctx, shardName, initialUUID, finalUUID, limit)
+func (i *Index) IncomingDigestObjectsInTokenRange(ctx context.Context,
+	shardName string, initialToken, finalToken uint64, limit int,
+) (result []replica.RepairResponse, lastTokenRead uint64, err error) {
+	return i.DigestObjectsInTokenRange(ctx, shardName, initialToken, finalToken, limit)
 }
 
 func (i *Index) HashTreeLevel(ctx context.Context,
