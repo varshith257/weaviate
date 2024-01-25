@@ -117,7 +117,7 @@ func (i *replicatedIndices) indicesHandler() http.HandlerFunc {
 			http.Error(w, "405 Method not Allowed", http.StatusMethodNotAllowed)
 			return
 		case regexObjectsDigestsInTokenRange.MatchString(path):
-			if r.Method == http.MethodGet {
+			if r.Method == http.MethodPost {
 				i.getObjectsDigestsInTokenRange().ServeHTTP(w, r)
 				return
 			}
@@ -125,7 +125,7 @@ func (i *replicatedIndices) indicesHandler() http.HandlerFunc {
 			http.Error(w, "405 Method not Allowed", http.StatusMethodNotAllowed)
 			return
 		case regxHashTreeLevel.MatchString(path):
-			if r.Method == http.MethodGet {
+			if r.Method == http.MethodPost {
 				i.getHashTreeLevel().ServeHTTP(w, r)
 				return
 			}
