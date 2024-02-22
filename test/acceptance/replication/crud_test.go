@@ -307,7 +307,7 @@ func eventualReplicaCRUD(t *testing.T) {
 		}
 	}()
 
-	helper.SetupClient(compose.GetWeaviateNode(1).URI())
+	helper.SetupClient(compose.GetWeaviate().URI())
 	paragraphClass := articles.ParagraphsClass()
 	articleClass := articles.ArticlesClass()
 
@@ -326,7 +326,7 @@ func eventualReplicaCRUD(t *testing.T) {
 				WithContents(fmt.Sprintf("paragraph#%d", i)).
 				Object()
 		}
-		createObjects(t, compose.GetWeaviateNode(1).URI(), batch)
+		createObjects(t, compose.GetWeaviate().URI(), batch)
 	})
 
 	t.Run("insert articles batch on node 1", func(t *testing.T) {
@@ -337,7 +337,7 @@ func eventualReplicaCRUD(t *testing.T) {
 				WithTitle(fmt.Sprintf("Article#%d", i)).
 				Object()
 		}
-		createObjects(t, compose.GetWeaviateNode(1).URI(), batch)
+		createObjects(t, compose.GetWeaviate().URI(), batch)
 	})
 
 	t.Run("configure classes to replicate to node 3", func(t *testing.T) {
