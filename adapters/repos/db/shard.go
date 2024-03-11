@@ -729,9 +729,12 @@ func (s *Shard) initHashTree(ctx context.Context) error {
 	}
 
 	if partitioningEnabled {
-		s.buildCompactHashTree()
+		s.hashtree, err = s.buildCompactHashTree()
 	} else {
-		s.buildMultiSegmentHashTree()
+		s.hashtree, err = s.buildMultiSegmentHashTree()
+	}
+	if err != nil {
+		return err
 	}
 
 	// sync hashtree with current object states
@@ -822,11 +825,11 @@ func (s *Shard) UpdateAsyncReplication(ctx context.Context, enabled bool) error 
 	return nil
 }
 
-func (s *Shard) buildCompactHashTree() {
-	s.hashtree = hashtree.NewCompactHashTree(math.MaxUint64, 16)
+func (s *Shard) buildCompactHashTree() (hashtree.AggregatedHashTree, error) {
+	return hashtree.NewCompactHashTree(math.MaxUint64, 16)
 }
 
-func (s *Shard) buildMultiSegmentHashTree() {
+func (s *Shard) buildMultiSegmentHashTree() (hashtree.AggregatedHashTree, error) {
 	shardState := s.index.shardState
 
 	virtualNodes := make([]sharding.Virtual, len(shardState.Virtual))
@@ -862,7 +865,7 @@ func (s *Shard) buildMultiSegmentHashTree() {
 		segments[i] = hashtree.NewSegment(segmentStart, segmentSize)
 	}
 
-	s.hashtree = hashtree.NewMultiSegmentHashTree(segments, 16)
+	return hashtree.NewMultiSegmentHashTree(segments, 16)
 }
 
 func (s *Shard) closeHashTree() error {
