@@ -27,6 +27,8 @@ type RemoteIncomingRepo interface {
 		shardName, requestID string, objects []*storobj.Object) SimpleResponse
 	ReplicateUpdate(ctx context.Context, indexName,
 		shardName, requestID string, mergeDoc *objects.MergeDocument) SimpleResponse
+	ReplicateUpdates(ctx context.Context, indexName,
+		shardName, requestID string, mergeDoc []*objects.MergeDocument) SimpleResponse
 	ReplicateDeletion(ctx context.Context, indexName,
 		shardName, requestID string, uuid strfmt.UUID) SimpleResponse
 	ReplicateDeletions(ctx context.Context, indexName,
@@ -74,6 +76,12 @@ func (rri *RemoteReplicaIncoming) ReplicateUpdate(ctx context.Context, indexName
 	shardName, requestID string, mergeDoc *objects.MergeDocument,
 ) SimpleResponse {
 	return rri.repo.ReplicateUpdate(ctx, indexName, shardName, requestID, mergeDoc)
+}
+
+func (rri *RemoteReplicaIncoming) ReplicateUpdates(ctx context.Context, indexName,
+	shardName, requestID string, mergeDocs []*objects.MergeDocument,
+) SimpleResponse {
+	return rri.repo.ReplicateUpdates(ctx, indexName, shardName, requestID, mergeDocs)
 }
 
 func (rri *RemoteReplicaIncoming) ReplicateDeletion(ctx context.Context, indexName,

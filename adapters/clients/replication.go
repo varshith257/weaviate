@@ -184,6 +184,25 @@ func (c *replicationClient) MergeObject(ctx context.Context, host, index, shard,
 	return resp, err
 }
 
+func (c *replicationClient) MergeObjects(ctx context.Context, host, index, shard, requestID string,
+	docs []*objects.MergeDocument,
+) (replica.SimpleResponse, error) {
+	var resp replica.SimpleResponse
+	body, err := clusterapi.IndicesPayloads.MergeDocList.Marshal(docs)
+	if err != nil {
+		return resp, fmt.Errorf("encode request: %w", err)
+	}
+
+	req, err := newHttpReplicaRequest(ctx, http.MethodPatch, host, index, shard, requestID, "", nil)
+	if err != nil {
+		return resp, fmt.Errorf("create http request: %w", err)
+	}
+
+	clusterapi.IndicesPayloads.MergeDocList.SetContentTypeHeaderReq(req)
+	err = c.do(c.timeoutUnit*90, req, body, &resp)
+	return resp, err
+}
+
 func (c *replicationClient) AddReferences(ctx context.Context, host, index,
 	shard, requestID string, refs []objects.BatchReference,
 ) (replica.SimpleResponse, error) {

@@ -42,6 +42,8 @@ type BatchVectorRepo interface {
 type batchRepoNew interface {
 	BatchPutObjects(ctx context.Context, objects BatchObjects,
 		repl *additional.ReplicationProperties) (BatchObjects, error)
+	BatchMergeObjects(ctx context.Context, objs BatchMergeDocuments,
+		repl *additional.ReplicationProperties) (BatchMergeDocuments, error)
 	BatchDeleteObjects(ctx context.Context, params BatchDeleteParams,
 		repl *additional.ReplicationProperties, tenant string) (BatchDeleteResult, error)
 	AddBatchReferences(ctx context.Context, references BatchReferences,

@@ -579,9 +579,18 @@ func init() {
         ],
         "responses": {
           "200": {
-            "description": "Successfully applied. No content provided.",
+            "description": "Request succeeded, see response body to get detailed information about each batched item.",
             "schema": {
-              "$ref": "#/definitions/BatchMergeResponse"
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ObjectsGetResponse"
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request.",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
             }
           },
           "401": {
@@ -3457,33 +3466,6 @@ func init() {
         }
       }
     },
-    "BatchMergeError": {
-      "description": "error if object failed to update",
-      "type": "object",
-      "properties": {
-        "message": {
-          "type": "string"
-        }
-      }
-    },
-    "BatchMergeIndividualResult": {
-      "type": "object",
-      "properties": {
-        "error": {
-          "$ref": "#/definitions/BatchMergeError"
-        },
-        "id": {
-          "description": "id of the given object",
-          "type": "string"
-        }
-      }
-    },
-    "BatchMergeResponse": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/BatchMergeIndividualResult"
-      }
-    },
     "BatchReference": {
       "properties": {
         "from": {
@@ -5742,9 +5724,18 @@ func init() {
         ],
         "responses": {
           "200": {
-            "description": "Successfully applied. No content provided.",
+            "description": "Request succeeded, see response body to get detailed information about each batched item.",
             "schema": {
-              "$ref": "#/definitions/BatchMergeResponse"
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ObjectsGetResponse"
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request.",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
             }
           },
           "401": {
@@ -8802,33 +8793,6 @@ func init() {
             "FAILED"
           ]
         }
-      }
-    },
-    "BatchMergeError": {
-      "description": "error if object failed to update",
-      "type": "object",
-      "properties": {
-        "message": {
-          "type": "string"
-        }
-      }
-    },
-    "BatchMergeIndividualResult": {
-      "type": "object",
-      "properties": {
-        "error": {
-          "$ref": "#/definitions/BatchMergeError"
-        },
-        "id": {
-          "description": "id of the given object",
-          "type": "string"
-        }
-      }
-    },
-    "BatchMergeResponse": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/BatchMergeIndividualResult"
       }
     },
     "BatchReference": {

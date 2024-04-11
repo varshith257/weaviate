@@ -14,14 +14,16 @@ package objects
 import (
 	"context"
 	"fmt"
-
-	"github.com/weaviate/weaviate/usecases/config"
+	"github.com/sirupsen/logrus"
 
 	"github.com/go-openapi/strfmt"
+	"github.com/google/uuid"
 	"github.com/weaviate/weaviate/entities/additional"
 	"github.com/weaviate/weaviate/entities/models"
 	"github.com/weaviate/weaviate/entities/schema"
 	"github.com/weaviate/weaviate/entities/schema/crossref"
+	"github.com/weaviate/weaviate/usecases/config"
+	"github.com/weaviate/weaviate/usecases/objects/validation"
 )
 
 type MergeDocument struct {
@@ -34,39 +36,78 @@ type MergeDocument struct {
 	UpdateTime           int64                       `json:"updateTime"`
 	AdditionalProperties models.AdditionalProperties `json:"additionalProperties"`
 	PropertiesToDelete   []string                    `json:"propertiesToDelete"`
+	Tenant               string                      `json:"tenant"`
 }
 
-func (m *Manager) MergeObject(ctx context.Context, principal *models.Principal,
+type objectMergeValidator struct {
+	config            *config.WeaviateConfig
+	authorizer        authorizer
+	vectorRepo        VectorRepo
+	autoSchemaManager *autoSchemaManager
+	schemaManager     schemaManager
+}
+
+func (m *objectMergeValidator) validateObject(ctx context.Context,
+	principal *models.Principal, repl *additional.ReplicationProperties,
+	incoming *models.Object, existing *models.Object,
+) error {
+	class, err := m.validateSchema(ctx, principal, incoming)
+	if err != nil {
+		return err
+	}
+
+	return validation.New(m.vectorRepo.Exists, m.config, repl).
+		Object(ctx, class, incoming, existing)
+}
+
+func (m *objectMergeValidator) validateSchema(ctx context.Context,
+	principal *models.Principal, obj *models.Object,
+) (*models.Class, error) {
+	// Validate schema given in body with the weaviate schema
+	if _, err := uuid.Parse(obj.ID.String()); err != nil {
+		return nil, err
+	}
+
+	class, err := m.schemaManager.GetClass(ctx, principal, obj.Class)
+	if err != nil {
+		return nil, err
+	}
+
+	if class == nil {
+		return nil, fmt.Errorf("class %q not found in schema", obj.Class)
+	}
+
+	return class, nil
+}
+
+func (m *objectMergeValidator) validateObjectMerge(ctx context.Context, principal *models.Principal,
 	updates *models.Object, repl *additional.ReplicationProperties,
-) *Error {
+) (*models.Object, []string, *Error) {
 	if err := m.validateInputs(updates); err != nil {
-		return &Error{"bad request", StatusBadRequest, err}
+		return nil, nil, &Error{"bad request", StatusBadRequest, err}
 	}
 	cls, id := updates.Class, updates.ID
 	path := fmt.Sprintf("objects/%s/%s", cls, id)
 	if err := m.authorizer.Authorize(principal, "update", path); err != nil {
-		return &Error{path, StatusForbidden, err}
+		return nil, nil, &Error{path, StatusForbidden, err}
 	}
-
-	m.metrics.MergeObjectInc()
-	defer m.metrics.MergeObjectDec()
 
 	obj, err := m.vectorRepo.Object(ctx, cls, id, nil, additional.Properties{}, repl, updates.Tenant)
 	if err != nil {
 		switch err.(type) {
 		case ErrMultiTenancy:
-			return &Error{"repo.object", StatusUnprocessableEntity, err}
+			return nil, nil, &Error{"repo.object", StatusUnprocessableEntity, err}
 		default:
-			return &Error{"repo.object", StatusInternalServerError, err}
+			return nil, nil, &Error{"repo.object", StatusInternalServerError, err}
 		}
 	}
 	if obj == nil {
-		return &Error{"not found", StatusNotFound, err}
+		return nil, nil, &Error{"not found", StatusNotFound, err}
 	}
 
 	err = m.autoSchemaManager.autoSchema(ctx, principal, updates, false)
 	if err != nil {
-		return &Error{"bad request", StatusBadRequest, NewErrInvalidUserInput("invalid object: %v", err)}
+		return nil, nil, &Error{"bad request", StatusBadRequest, NewErrInvalidUserInput("invalid object: %v", err)}
 	}
 
 	var propertiesToDelete []string
@@ -79,13 +120,45 @@ func (m *Manager) MergeObject(ctx context.Context, principal *models.Principal,
 	}
 
 	prevObj := obj.Object()
-	if err := m.validateObjectAndNormalizeNames(
+	if err := m.validateObject(
 		ctx, principal, repl, updates, prevObj); err != nil {
-		return &Error{"bad request", StatusBadRequest, err}
+		return nil, nil, &Error{"bad request", StatusBadRequest, err}
 	}
 
 	if updates.Properties == nil {
 		updates.Properties = map[string]interface{}{}
+	}
+	return prevObj, propertiesToDelete, nil
+}
+
+func (m *objectMergeValidator) validateInputs(updates *models.Object) error {
+	if updates == nil {
+		return fmt.Errorf("empty updates")
+	}
+	if updates.Class == "" {
+		return fmt.Errorf("empty class")
+	}
+	if updates.ID == "" {
+		return fmt.Errorf("empty uuid")
+	}
+	return nil
+}
+
+func (m *Manager) MergeObject(ctx context.Context, principal *models.Principal,
+	updates *models.Object, repl *additional.ReplicationProperties,
+) *Error {
+	mergeValidator := &objectMergeValidator{
+		config:            m.config,
+		authorizer:        m.authorizer,
+		vectorRepo:        m.vectorRepo,
+		autoSchemaManager: m.autoSchemaManager,
+		schemaManager:     m.schemaManager,
+	}
+
+	prevObj, propertiesToDelete, err := mergeValidator.
+		validateObjectMerge(ctx, principal, updates, repl)
+	if err != nil {
+		return err
 	}
 
 	return m.patchObject(ctx, principal, prevObj, updates, repl, propertiesToDelete, updates.Tenant)
@@ -97,9 +170,15 @@ func (m *Manager) patchObject(ctx context.Context, principal *models.Principal,
 	propertiesToDelete []string, tenant string,
 ) *Error {
 	cls, id := updates.Class, updates.ID
-	primitive, refs := m.splitPrimitiveAndRefs(updates.Properties.(map[string]interface{}), cls, id)
-	objWithVec, err := m.mergeObjectSchemaAndVectorize(ctx, cls, prevObj.Properties,
-		primitive, principal, prevObj.Vector, updates.Vector, prevObj.Vectors, updates.Vectors, updates.ID)
+	primitive, refs := splitPrimitiveAndRefs(updates.Properties.(map[string]interface{}), cls, id)
+	objWithVec, err := mergeObjectSchemaAndVectorize(ctx, cls, prevObj.Properties,
+		primitive, principal, prevObj.Vector, updates.Vector, prevObj.Vectors,
+		updates.Vectors, updates.ID, merger{
+			schemaManager:   m.schemaManager,
+			modulesProvider: m.modulesProvider,
+			findObject:      m.findObject,
+			logger:          m.logger,
+		})
 	if err != nil {
 		return &Error{"merge and vectorize", StatusInternalServerError, err}
 	}
@@ -125,25 +204,20 @@ func (m *Manager) patchObject(ctx context.Context, principal *models.Principal,
 	return nil
 }
 
-func (m *Manager) validateInputs(updates *models.Object) error {
-	if updates == nil {
-		return fmt.Errorf("empty updates")
-	}
-	if updates.Class == "" {
-		return fmt.Errorf("empty class")
-	}
-	if updates.ID == "" {
-		return fmt.Errorf("empty uuid")
-	}
-	return nil
+type merger struct {
+	schemaManager   schemaManager
+	modulesProvider ModulesProvider
+	findObject      objectFinder
+	logger          logrus.FieldLogger
 }
 
-func (m *Manager) mergeObjectSchemaAndVectorize(ctx context.Context, className string,
+func mergeObjectSchemaAndVectorize(ctx context.Context, className string,
 	prevPropsSch models.PropertySchema, nextProps map[string]interface{},
 	principal *models.Principal, prevVec, nextVec []float32,
 	prevVecs models.Vectors, nextVecs models.Vectors, id strfmt.UUID,
+	merger merger,
 ) (*models.Object, error) {
-	class, err := m.schemaManager.GetClass(ctx, principal, className)
+	class, err := merger.schemaManager.GetClass(ctx, principal, className)
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +246,7 @@ func (m *Manager) mergeObjectSchemaAndVectorize(ctx context.Context, className s
 	// Note: vector could be a nil vector in case a vectorizer is configured,
 	// then the vectorizer will set it
 	obj := &models.Object{Class: className, Properties: mergedProps, Vector: vector, Vectors: vectors, ID: id}
-	if err := m.modulesProvider.UpdateVector(ctx, obj, class, m.findObject, m.logger); err != nil {
+	if err := merger.modulesProvider.UpdateVector(ctx, obj, class, merger.findObject, merger.logger); err != nil {
 		return nil, err
 	}
 
@@ -207,7 +281,7 @@ func (m *Manager) mergeObjectSchemaAndVectorize(ctx context.Context, className s
 	return obj, nil
 }
 
-func (m *Manager) splitPrimitiveAndRefs(in map[string]interface{}, sourceClass string,
+func splitPrimitiveAndRefs(in map[string]interface{}, sourceClass string,
 	sourceID strfmt.UUID,
 ) (map[string]interface{}, BatchReferences) {
 	primitive := map[string]interface{}{}

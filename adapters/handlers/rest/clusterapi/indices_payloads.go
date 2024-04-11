@@ -37,6 +37,7 @@ type indicesPayloads struct {
 	ErrorList                 errorListPayload
 	SingleObject              singleObjectPayload
 	MergeDoc                  mergeDocPayload
+	MergeDocList              mergeDocListPayload
 	ObjectList                objectListPayload
 	VersionedObjectList       versionedObjectListPayload
 	SearchResults             searchResultsPayload
@@ -339,6 +340,38 @@ func (p mergeDocPayload) Unmarshal(in []byte) (objects.MergeDocument, error) {
 	var mergeDoc objects.MergeDocument
 	err := json.Unmarshal(in, &mergeDoc)
 	return mergeDoc, err
+}
+
+type mergeDocListPayload struct{}
+
+func (p mergeDocListPayload) MIME() string {
+	return "application/vnd.weaviate.mergedoclist+json"
+}
+
+func (p mergeDocListPayload) SetContentTypeHeader(w http.ResponseWriter) {
+	w.Header().Set("content-type", p.MIME())
+}
+
+func (p mergeDocListPayload) SetContentTypeHeaderReq(r *http.Request) {
+	r.Header.Set("content-type", p.MIME())
+}
+
+func (p mergeDocListPayload) CheckContentTypeHeaderReq(r *http.Request) (string, bool) {
+	ct := r.Header.Get("content-type")
+	return ct, ct == p.MIME()
+}
+
+func (p mergeDocListPayload) Marshal(in []*objects.MergeDocument) ([]byte, error) {
+	// assumes that this type is fully json-marshable. Not the most
+	// bandwidth-efficient way, but this is unlikely to become a bottleneck. If it
+	// does, a custom binary marshaller might be more appropriate
+	return json.Marshal(in)
+}
+
+func (p mergeDocListPayload) Unmarshal(in []byte) ([]*objects.MergeDocument, error) {
+	var mergeDocs []*objects.MergeDocument
+	err := json.Unmarshal(in, &mergeDocs)
+	return mergeDocs, err
 }
 
 type searchParamsPayload struct{}

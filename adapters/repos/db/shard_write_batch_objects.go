@@ -19,14 +19,14 @@ import (
 	"sync"
 	"time"
 
-	enterrors "github.com/weaviate/weaviate/entities/errors"
-	"github.com/weaviate/weaviate/usecases/configbase"
-
 	"github.com/go-openapi/strfmt"
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
+	enterrors "github.com/weaviate/weaviate/entities/errors"
 	"github.com/weaviate/weaviate/entities/storagestate"
 	"github.com/weaviate/weaviate/entities/storobj"
+	"github.com/weaviate/weaviate/usecases/configbase"
+	"github.com/weaviate/weaviate/usecases/objects"
 )
 
 // return value map[int]error gives the error for the index as it received it
@@ -59,7 +59,7 @@ func (s *Shard) putBatch(ctx context.Context,
 	// adds its jobs (that contain the respective object) to a single queue that is then processed by the workers.
 	// When the last batch finishes, all workers receive a shutdown signal and exit
 	batcher := newObjectsBatcher(s)
-	err := batcher.Objects(ctx, objects)
+	err := batcher.PutObjects(ctx, objects)
 
 	// block until all objects of batch have been added
 	batcher.wg.Wait()
@@ -74,13 +74,34 @@ func (s *Shard) putBatchAsync(ctx context.Context, objects []*storobj.Object) []
 
 	batcher := newObjectsBatcher(s)
 
-	batcher.init(objects)
+	batcher.initPut(objects)
 	batcher.storeInObjectStore(ctx)
 	batcher.markDeletedInVectorStorage(ctx)
 	batcher.storeAdditionalStorageWithAsyncQueue(ctx)
 	batcher.flushWALs(ctx)
 
 	return batcher.errs
+}
+
+func (s *Shard) MergeObjectBatch(ctx context.Context,
+	docs []*objects.MergeDocument,
+) []error {
+	if s.isReadOnly() {
+		return []error{storagestate.ErrStatusReadOnly}
+	}
+
+	return s.mergeBatch(ctx, docs)
+}
+
+func (s *Shard) mergeBatch(ctx context.Context, docs []*objects.MergeDocument) []error {
+	if asyncEnabled() {
+	}
+
+	batcher := newObjectsBatcher(s)
+	err := batcher.MergeObjects(ctx, docs)
+
+	batcher.wg.Wait()
+	return err
 }
 
 // objectsBatcher is a helper type wrapping around an underlying shard that can
@@ -93,6 +114,7 @@ type objectsBatcher struct {
 	errs           []error
 	duplicates     map[int]struct{}
 	objects        []*storobj.Object
+	mergeDocs      []*objects.MergeDocument
 	wg             sync.WaitGroup
 	batchStartTime time.Time
 }
@@ -102,13 +124,13 @@ func newObjectsBatcher(s ShardLike) *objectsBatcher {
 }
 
 // Objects imports the specified objects in parallel in a batch-fashion
-func (ob *objectsBatcher) Objects(ctx context.Context,
+func (ob *objectsBatcher) PutObjects(ctx context.Context,
 	objects []*storobj.Object,
 ) []error {
 	beforeBatch := time.Now()
 	defer ob.shard.Metrics().BatchObject(beforeBatch, len(objects))
 
-	ob.init(objects)
+	ob.initPut(objects)
 	ob.storeInObjectStore(ctx)
 	ob.markDeletedInVectorStorage(ctx)
 	ob.storeAdditionalStorageWithWorkers(ctx)
@@ -116,11 +138,35 @@ func (ob *objectsBatcher) Objects(ctx context.Context,
 	return ob.errs
 }
 
-func (ob *objectsBatcher) init(objects []*storobj.Object) {
+func (ob *objectsBatcher) MergeObjects(ctx context.Context,
+	docs []*objects.MergeDocument,
+) []error {
+	ob.initMerge(docs)
+
+	for _, doc := range ob.mergeDocs {
+		uuidParsed, err := uuid.Parse(doc.ID.String())
+		if err != nil {
+			return errors.Wrap(err, "invalid id")
+		}
+
+		idBytes, err := uuidParsed.MarshalBinary()
+		if err != nil {
+			return err
+		}
+		ob.shard.mutableMergeObjectLSM(*doc, idBytes)
+	}
+}
+
+func (ob *objectsBatcher) initPut(objects []*storobj.Object) {
 	ob.objects = objects
 	ob.statuses = map[strfmt.UUID]objectInsertStatus{}
 	ob.errs = make([]error, len(objects))
 	ob.duplicates = findDuplicatesInBatchObjects(objects)
+}
+
+func (ob *objectsBatcher) initMerge(docs []*objects.MergeDocument) {
+	ob.mergeDocs = docs
+	ob.errs = make([]error, len(docs))
 }
 
 // storeInObjectStore performs all storage operations on the underlying
@@ -140,9 +186,8 @@ func (ob *objectsBatcher) storeInObjectStore(ctx context.Context) {
 }
 
 func (ob *objectsBatcher) storeSingleBatchInLSM(ctx context.Context,
-	batch []*storobj.Object,
 ) []error {
-	errs := make([]error, len(batch))
+	errs := make([]error, len(ob.objects))
 	errLock := &sync.Mutex{}
 
 	// if the context is expired fail all
@@ -156,7 +201,7 @@ func (ob *objectsBatcher) storeSingleBatchInLSM(ctx context.Context,
 	wg := &sync.WaitGroup{}
 	concurrencyLimit := make(chan struct{}, _NUMCPU)
 
-	for j, object := range batch {
+	for j, object := range ob.objects {
 		wg.Add(1)
 		object := object
 		index := j

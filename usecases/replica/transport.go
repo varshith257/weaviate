@@ -173,6 +173,8 @@ type wClient interface {
 		objs []*storobj.Object) (SimpleResponse, error)
 	MergeObject(ctx context.Context, host, index, shard, requestID string,
 		mergeDoc *objects.MergeDocument) (SimpleResponse, error)
+	MergeObjects(ctx context.Context, host, index, shard, requestID string,
+		mergeDocs []*objects.MergeDocument) (SimpleResponse, error)
 	DeleteObjects(ctx context.Context, host, index, shard, requestID string,
 		uuids []strfmt.UUID, dryRun bool) (SimpleResponse, error)
 	AddReferences(ctx context.Context, host, index, shard, requestID string,

@@ -74,7 +74,7 @@ func (m *Manager) updateObjectToConnectorAndSchema(ctx context.Context,
 		Debug("received update kind request")
 
 	prevObj := obj.Object()
-	err = m.validateObjectAndNormalizeNames(
+	err = m.validateObject(
 		ctx, principal, repl, updates, prevObj)
 	if err != nil {
 		return nil, NewErrInvalidUserInput("invalid object: %v", err)

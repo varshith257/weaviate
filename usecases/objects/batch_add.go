@@ -42,18 +42,18 @@ func (b *BatchManager) AddObjects(ctx context.Context, principal *models.Princip
 	defer b.metrics.BatchOp("total_uc_level", before.UnixNano())
 	defer b.metrics.BatchDec()
 
-	return b.addObjects(ctx, principal, objects, fields, repl)
+	return b.addObjects(ctx, principal, objects, repl)
 }
 
 func (b *BatchManager) addObjects(ctx context.Context, principal *models.Principal,
-	classes []*models.Object, fields []*string, repl *additional.ReplicationProperties,
+	objects []*models.Object, repl *additional.ReplicationProperties,
 ) (BatchObjects, error) {
 	beforePreProcessing := time.Now()
-	if err := b.validateObjectForm(classes); err != nil {
+	if err := b.validateObjectForm(objects); err != nil {
 		return nil, NewErrInvalidUserInput("invalid param 'objects': %v", err)
 	}
 
-	batchObjects := b.validateAndGetVector(ctx, principal, classes, repl)
+	batchObjects := b.validateAndGetVector(ctx, principal, objects, repl)
 	b.metrics.BatchOp("total_preprocessing", beforePreProcessing.UnixNano())
 
 	var (
@@ -150,7 +150,6 @@ func (b *BatchManager) validateAndGetVector(ctx context.Context, principal *mode
 			origIndex := originalIndexPerClass[className][i]
 			batchObjects[origIndex].Err = err
 		}
-
 	}
 
 	return batchObjects
