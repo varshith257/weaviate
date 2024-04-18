@@ -147,6 +147,11 @@
     "Vectors": {
       "description": "A Multi Vector map of named vectors",
       "type": "object",
+      "properties": {
+        "<vector_name>": {
+          "$ref": "#/definitions/Vector"
+        }
+      },
       "additionalProperties": {
         "$ref": "#/definitions/Vector"
       }
@@ -911,7 +916,7 @@
     },
     "BackupConfig": {
       "description": "Backup custom configuration",
-      "type": "object",      
+      "type": "object",
       "properties": {
         "CPUPercentage": {
           "description": "Desired CPU core utilization ranging from 1%-80%",
@@ -944,7 +949,7 @@
     },
     "RestoreConfig": {
       "description": "Backup custom configuration",
-      "type": "object",      
+      "type": "object",
       "properties": {
         "CPUPercentage": {
           "description": "Desired CPU core utilization ranging from 1%-80%",
@@ -953,7 +958,7 @@
           "minimum": 1,
           "maximum": 80,
           "x-nullable": false
-        }       
+        }
       }
     },
     "BackupCreateRequest": {
@@ -1455,7 +1460,11 @@
         },
         "vectors": {
           "description": "This field returns vectors associated with the Object.",
-          "$ref": "#/definitions/Vectors"
+          "properties": {
+            "<vector_name>": {
+              "$ref": "#/definitions/Vectors"
+            }
+          }
         },
         "tenant": {
           "description": "Name of the Objects tenant.",
@@ -4594,7 +4603,7 @@
           }
         }
       }
-    },    
+    },
     "/backups/{backend}": {
       "post": {
         "description": "Starts a process of creating a backup for a set of classes",
