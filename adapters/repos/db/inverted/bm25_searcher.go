@@ -181,6 +181,8 @@ func (b *BM25Searcher) wand(
 
 	var resultsLock sync.Mutex
 
+	b.logger.Debugf("Class: %s, query: %s", class.Class, params.Query)
+
 	for _, tokenization := range helpers.Tokenizations {
 		propNames := propNamesByTokenization[tokenization]
 		if len(propNames) > 0 {
@@ -191,6 +193,7 @@ func (b *BM25Searcher) wand(
 				queryTerms, duplicateBoosts = b.removeStopwordsFromQueryTerms(
 					queryTerms, duplicateBoosts, stopWordDetector)
 			}
+			b.logger.Debugf("Class: %s, tokenization: %s, query term count: %d", class.Class, tokenization, len(queryTerms))
 
 			for i := range queryTerms {
 				j := i
@@ -221,6 +224,8 @@ func (b *BM25Searcher) wand(
 			limit += len(ind)
 		}
 	}
+
+	b.logger.Debugf("Class: %s, total query term count: %d", class.Class, len(results))
 
 	// the results are needed in the original order to be able to locate frequency/property length for the top-results
 	resultsOriginalOrder := make(terms, len(results))
