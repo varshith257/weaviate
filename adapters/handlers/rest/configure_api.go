@@ -29,12 +29,15 @@ import (
 	"github.com/weaviate/fgprof"
 
 	"github.com/KimMachineGun/automemlimit/memlimit"
+	armonmetrics "github.com/armon/go-metrics"
+	armonprometheus "github.com/armon/go-metrics/prometheus"
 	"github.com/getsentry/sentry-go"
 	openapierrors "github.com/go-openapi/errors"
 	"github.com/go-openapi/runtime"
 	"github.com/go-openapi/swag"
 	"github.com/pbnjay/memory"
 	"github.com/pkg/errors"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors/version"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -91,6 +94,7 @@ import (
 	modrerankervoyageai "github.com/weaviate/weaviate/modules/reranker-voyageai"
 	modsum "github.com/weaviate/weaviate/modules/sum-transformers"
 	modspellcheck "github.com/weaviate/weaviate/modules/text-spellcheck"
+	modtext2colbertjinaai "github.com/weaviate/weaviate/modules/text2colbert-jinaai"
 	modtext2vecaws "github.com/weaviate/weaviate/modules/text2vec-aws"
 	modt2vbigram "github.com/weaviate/weaviate/modules/text2vec-bigram"
 	modcohere "github.com/weaviate/weaviate/modules/text2vec-cohere"
@@ -108,7 +112,6 @@ import (
 	modvoyageai "github.com/weaviate/weaviate/modules/text2vec-voyageai"
 	modweaviateembed "github.com/weaviate/weaviate/modules/text2vec-weaviate"
 	"github.com/weaviate/weaviate/usecases/auth/authentication/composer"
-	"github.com/weaviate/weaviate/usecases/auth/authorization/rbac"
 	"github.com/weaviate/weaviate/usecases/backup"
 	"github.com/weaviate/weaviate/usecases/build"
 	"github.com/weaviate/weaviate/usecases/classification"
@@ -198,12 +201,35 @@ func MakeAppState(ctx context.Context, options *swag.CommandLineOptionsGroup) *s
 	appState := startupRoutine(ctx, options)
 
 	if appState.ServerConfig.Config.Monitoring.Enabled {
-		appState.ServerMetrics = monitoring.NewServerMetrics(appState.ServerConfig.Config.Monitoring, prometheus.DefaultRegisterer)
+		appState.ServerMetrics = monitoring.NewServerMetrics(appState.ServerConfig.Config.Monitoring.MetricsNamespace, prometheus.DefaultRegisterer)
 		appState.TenantActivity = tenantactivity.NewHandler()
 
 		// export build tags to prometheus metric
 		build.SetPrometheusBuildInfo()
 		prometheus.MustRegister(version.NewCollector(build.AppName))
+
+		opts := armonprometheus.PrometheusOpts{
+			Expiration: 0, // never expire any metrics,
+			Registerer: prometheus.DefaultRegisterer,
+		}
+
+		sink, err := armonprometheus.NewPrometheusSinkFrom(opts)
+		if err != nil {
+			appState.Logger.WithField("action", "startup").WithError(err).Fatal("failed to create prometheus sink for raft metrics")
+		}
+
+		cfg := armonmetrics.DefaultConfig("weaviate_internal") // to differentiate it's coming from internal/dependency packages.
+		cfg.EnableHostname = false                             // no `host` label
+		cfg.EnableHostnameLabel = false                        // no `hostname` label
+		cfg.EnableServiceLabel = false                         // no `service` label
+		cfg.EnableRuntimeMetrics = false                       // runtime metrics already provided by prometheus
+		cfg.EnableTypePrefix = true                            // to have some meaningful suffix to identify type of metrics.
+		cfg.TimerGranularity = time.Second                     // time should always in seconds
+
+		_, err = armonmetrics.NewGlobal(cfg, sink)
+		if err != nil {
+			appState.Logger.WithField("action", "startup").WithError(err).Fatal("failed to create metric registry raft metrics")
+		}
 
 		// only monitoring tool supported at the moment is prometheus
 		enterrors.GoWrapper(func() {
@@ -292,7 +318,7 @@ func MakeAppState(ctx context.Context, options *swag.CommandLineOptionsGroup) *s
 
 	// now that modules are loaded we can run the remaining config validation
 	// which is module dependent
-	if err := appState.ServerConfig.Config.Validate(appState.Modules); err != nil {
+	if err := appState.ServerConfig.Config.ValidateModules(appState.Modules); err != nil {
 		appState.Logger.
 			WithField("action", "startup").WithError(err).
 			Fatal("invalid config")
@@ -315,30 +341,31 @@ func MakeAppState(ctx context.Context, options *swag.CommandLineOptionsGroup) *s
 	remoteNodesClient := clients.NewRemoteNode(appState.ClusterHttpClient)
 	replicationClient := clients.NewReplicationClient(appState.ClusterHttpClient)
 	repo, err := db.New(appState.Logger, db.Config{
-		ServerVersion:                  config.ServerVersion,
-		GitHash:                        build.Revision,
-		MemtablesFlushDirtyAfter:       appState.ServerConfig.Config.Persistence.MemtablesFlushDirtyAfter,
-		MemtablesInitialSizeMB:         10,
-		MemtablesMaxSizeMB:             appState.ServerConfig.Config.Persistence.MemtablesMaxSizeMB,
-		MemtablesMinActiveSeconds:      appState.ServerConfig.Config.Persistence.MemtablesMinActiveDurationSeconds,
-		MemtablesMaxActiveSeconds:      appState.ServerConfig.Config.Persistence.MemtablesMaxActiveDurationSeconds,
-		SegmentsCleanupIntervalSeconds: appState.ServerConfig.Config.Persistence.LSMSegmentsCleanupIntervalSeconds,
-		SeparateObjectsCompactions:     appState.ServerConfig.Config.Persistence.LSMSeparateObjectsCompactions,
-		MaxSegmentSize:                 appState.ServerConfig.Config.Persistence.LSMMaxSegmentSize,
-		HNSWMaxLogSize:                 appState.ServerConfig.Config.Persistence.HNSWMaxLogSize,
-		HNSWWaitForCachePrefill:        appState.ServerConfig.Config.HNSWStartupWaitForVectorCache,
-		HNSWFlatSearchConcurrency:      appState.ServerConfig.Config.HNSWFlatSearchConcurrency,
-		VisitedListPoolMaxSize:         appState.ServerConfig.Config.HNSWVisitedListPoolMaxSize,
-		RootPath:                       appState.ServerConfig.Config.Persistence.DataPath,
-		QueryLimit:                     appState.ServerConfig.Config.QueryDefaults.Limit,
-		QueryMaximumResults:            appState.ServerConfig.Config.QueryMaximumResults,
-		QueryNestedRefLimit:            appState.ServerConfig.Config.QueryNestedCrossReferenceLimit,
-		MaxImportGoroutinesFactor:      appState.ServerConfig.Config.MaxImportGoroutinesFactor,
-		TrackVectorDimensions:          appState.ServerConfig.Config.TrackVectorDimensions,
-		ResourceUsage:                  appState.ServerConfig.Config.ResourceUsage,
-		AvoidMMap:                      appState.ServerConfig.Config.AvoidMmap,
-		DisableLazyLoadShards:          appState.ServerConfig.Config.DisableLazyLoadShards,
-		ForceFullReplicasSearch:        appState.ServerConfig.Config.ForceFullReplicasSearch,
+		ServerVersion:                        config.ServerVersion,
+		GitHash:                              build.Revision,
+		MemtablesFlushDirtyAfter:             appState.ServerConfig.Config.Persistence.MemtablesFlushDirtyAfter,
+		MemtablesInitialSizeMB:               10,
+		MemtablesMaxSizeMB:                   appState.ServerConfig.Config.Persistence.MemtablesMaxSizeMB,
+		MemtablesMinActiveSeconds:            appState.ServerConfig.Config.Persistence.MemtablesMinActiveDurationSeconds,
+		MemtablesMaxActiveSeconds:            appState.ServerConfig.Config.Persistence.MemtablesMaxActiveDurationSeconds,
+		SegmentsCleanupIntervalSeconds:       appState.ServerConfig.Config.Persistence.LSMSegmentsCleanupIntervalSeconds,
+		SeparateObjectsCompactions:           appState.ServerConfig.Config.Persistence.LSMSeparateObjectsCompactions,
+		MaxSegmentSize:                       appState.ServerConfig.Config.Persistence.LSMMaxSegmentSize,
+		HNSWMaxLogSize:                       appState.ServerConfig.Config.Persistence.HNSWMaxLogSize,
+		HNSWWaitForCachePrefill:              appState.ServerConfig.Config.HNSWStartupWaitForVectorCache,
+		HNSWFlatSearchConcurrency:            appState.ServerConfig.Config.HNSWFlatSearchConcurrency,
+		VisitedListPoolMaxSize:               appState.ServerConfig.Config.HNSWVisitedListPoolMaxSize,
+		RootPath:                             appState.ServerConfig.Config.Persistence.DataPath,
+		QueryLimit:                           appState.ServerConfig.Config.QueryDefaults.Limit,
+		QueryMaximumResults:                  appState.ServerConfig.Config.QueryMaximumResults,
+		QueryNestedRefLimit:                  appState.ServerConfig.Config.QueryNestedCrossReferenceLimit,
+		MaxImportGoroutinesFactor:            appState.ServerConfig.Config.MaxImportGoroutinesFactor,
+		TrackVectorDimensions:                appState.ServerConfig.Config.TrackVectorDimensions,
+		ResourceUsage:                        appState.ServerConfig.Config.ResourceUsage,
+		AvoidMMap:                            appState.ServerConfig.Config.AvoidMmap,
+		DisableLazyLoadShards:                appState.ServerConfig.Config.DisableLazyLoadShards,
+		ForceFullReplicasSearch:              appState.ServerConfig.Config.ForceFullReplicasSearch,
+		LSMDisableSegmentsChecksumValidation: appState.ServerConfig.Config.Persistence.LSMDisableSegmentsChecksumValidation,
 		// Pass dummy replication config with minimum factor 1. Otherwise the
 		// setting is not backward-compatible. The user may have created a class
 		// with factor=1 before the change was introduced. Now their setup would no
@@ -651,6 +678,7 @@ func configureAPI(api *operations.WeaviateAPI) http.Handler {
 		appState.ClusterService.Raft,
 		appState.SchemaManager,
 		appState.ServerConfig.Config.Authentication.APIKey,
+		appState.ServerConfig.Config.Authentication.OIDC,
 		appState.ServerConfig.Config.Authorization.Rbac,
 		appState.Metrics,
 		appState.Authorizer,
@@ -797,17 +825,7 @@ func startupRoutine(ctx context.Context, options *swag.CommandLineOptionsGroup) 
 	appState.OIDC = configureOIDC(appState)
 	appState.APIKey = configureAPIKey(appState)
 	appState.AnonymousAccess = configureAnonymousAccess(appState)
-	rbacStoragePath := filepath.Join(appState.ServerConfig.Config.Persistence.DataPath, config.DefaultRaftDir)
-	rbacConfig := appState.ServerConfig.Config.Authorization.Rbac
-	controller, err := rbac.New(rbacStoragePath, rbacConfig, appState.Logger)
-	if err != nil {
-		logger.WithField("action", "startup").WithField("error", err).WithField("startupPath", rbacStoragePath).Error("cannot init casbin")
-		logger.Exit(1)
-	}
-
-	appState.AuthzController = controller
-
-	if err = configureAuthorizer(appState, controller); err != nil {
+	if err = configureAuthorizer(appState); err != nil {
 		logger.WithField("action", "startup").WithField("error", err).Error("cannot configure authorizer")
 		logger.Exit(1)
 	}
@@ -897,6 +915,7 @@ func registerModules(appState *state.State) error {
 		modvoyageai.Name,
 		modmulti2vecvoyageai.Name,
 		modweaviateembed.Name,
+		modtext2colbertjinaai.Name,
 	}
 	defaultGenerative := []string{
 		modgenerativeanthropic.Name,
@@ -1346,6 +1365,14 @@ func registerModules(appState *state.State) error {
 		appState.Logger.
 			WithField("action", "startup").
 			WithField("module", modtext2vecoctoai.Name).
+			Debug("enabled module")
+	}
+
+	if _, ok := enabledModules[modtext2colbertjinaai.Name]; ok {
+		appState.Modules.Register(modtext2colbertjinaai.New())
+		appState.Logger.
+			WithField("action", "startup").
+			WithField("module", modtext2colbertjinaai.Name).
 			Debug("enabled module")
 	}
 
