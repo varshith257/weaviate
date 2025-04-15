@@ -32,14 +32,14 @@ func Parse(in *models.WhereFilter, rootClass string) (*filters.LocalFilter, erro
 	if operator.OnValue() {
 		filter, err := parseValueFilter(in, operator, rootClass)
 		if err != nil {
-			return nil, fmt.Errorf("invalid where filter: %v", err)
+			return nil, fmt.Errorf("invalid where filter: %w", err)
 		}
 		return filter, nil
 	}
 
 	filter, err := parseNestedFilter(in, operator, rootClass)
 	if err != nil {
-		return nil, fmt.Errorf("invalid where filter: %v", err)
+		return nil, fmt.Errorf("invalid where filter: %w", err)
 	}
 	return filter, nil
 }
@@ -108,7 +108,7 @@ func parseOperands(ops []*models.WhereFilter, rootClass string) ([]filters.Claus
 	for i, operand := range ops {
 		res, err := Parse(operand, rootClass)
 		if err != nil {
-			return nil, fmt.Errorf("operand %d: %v", i, err)
+			return nil, fmt.Errorf("operand %d: %w", i, err)
 		}
 
 		out[i] = *res.Root
@@ -123,6 +123,8 @@ func parseOperator(in string) (filters.Operator, error) {
 		return filters.OperatorEqual, nil
 	case models.WhereFilterOperatorLike:
 		return filters.OperatorLike, nil
+	case models.WhereFilterOperatorNotLike:
+		return filters.OperatorNotLike, nil
 	case models.WhereFilterOperatorLessThan:
 		return filters.OperatorLessThan, nil
 	case models.WhereFilterOperatorLessThanEqual:

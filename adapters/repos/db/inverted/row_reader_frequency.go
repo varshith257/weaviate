@@ -20,6 +20,7 @@ import (
 	"github.com/weaviate/sroar"
 	"github.com/weaviate/weaviate/adapters/repos/db/lsmkv"
 	"github.com/weaviate/weaviate/adapters/repos/db/roaringset"
+	"github.com/weaviate/weaviate/entities/concurrency"
 	"github.com/weaviate/weaviate/entities/filters"
 )
 
@@ -63,6 +64,8 @@ func (rr *RowReaderFrequency) Read(ctx context.Context, readFn ReadFn) error {
 		return rr.lessThan(ctx, readFn, true)
 	case filters.OperatorLike:
 		return rr.like(ctx, readFn)
+	case filters.OperatorNotLike:
+		return rr.notLike(ctx, readFn)
 	default:
 		return fmt.Errorf("operator %v supported", rr.operator)
 	}
@@ -76,7 +79,7 @@ func (rr *RowReaderFrequency) equal(ctx context.Context, readFn ReadFn) error {
 		return err
 	}
 
-	_, err = readFn(rr.value, rr.transformToBitmap(v))
+	_, err = readFn(rr.value, rr.transformToBitmap(v), noopRelease)
 	return err
 }
 
@@ -87,9 +90,9 @@ func (rr *RowReaderFrequency) notEqual(ctx context.Context, readFn ReadFn) error
 	}
 
 	// Invert the Equal results for an efficient NotEqual
-	inverted := rr.bitmapFactory.GetBitmap()
-	inverted.AndNot(rr.transformToBitmap(v))
-	_, err = readFn(rr.value, inverted)
+	inverted, release := rr.bitmapFactory.GetBitmap()
+	inverted.AndNotConc(rr.transformToBitmap(v), concurrency.SROAR_MERGE)
+	_, err = readFn(rr.value, inverted, release)
 	return err
 }
 
@@ -110,7 +113,7 @@ func (rr *RowReaderFrequency) greaterThan(ctx context.Context, readFn ReadFn,
 			continue
 		}
 
-		continueReading, err := readFn(k, rr.transformToBitmap(v))
+		continueReading, err := readFn(k, rr.transformToBitmap(v), noopRelease)
 		if err != nil {
 			return err
 		}
@@ -141,7 +144,7 @@ func (rr *RowReaderFrequency) lessThan(ctx context.Context, readFn ReadFn,
 			continue
 		}
 
-		continueReading, err := readFn(k, rr.transformToBitmap(v))
+		continueReading, err := readFn(k, rr.transformToBitmap(v), noopRelease)
 		if err != nil {
 			return err
 		}
@@ -165,6 +168,40 @@ func (rr *RowReaderFrequency) like(ctx context.Context, readFn ReadFn) error {
 	c := rr.newCursor(lsmkv.MapListAcceptDuplicates())
 	defer c.Close()
 
+	return rr.likeHelper(ctx, like, c, func(k []byte, v []lsmkv.MapPair) (bool, error) {
+		return readFn(k, rr.transformToBitmap(v))
+	})
+}
+
+func (rr *RowReaderFrequency) notLike(ctx context.Context, readFn ReadFn) error {
+	like, err := parseLikeRegexp(rr.value)
+	if err != nil {
+		return fmt.Errorf("parse notLike value: %w", err)
+	}
+
+	// TODO: don't we need to check here if this is a doc id vs a object search?
+	// Or is this not a problem because the latter removes duplicates anyway?
+	c := rr.newCursor(lsmkv.MapListAcceptDuplicates())
+	defer c.Close()
+
+	likeMap := sroar.NewBitmap()
+	if err := rr.likeHelper(ctx, like, c, func(k []byte, v []lsmkv.MapPair) (bool, error) {
+		likeMap.Or(rr.transformToBitmap(v))
+		return true, nil
+	}); err != nil {
+		return err
+	}
+
+	// Invert the Equal results for an efficient NotEqual
+	inverted := rr.bitmapFactory.GetBitmap()
+	inverted.AndNot(likeMap)
+	_, err = readFn(rr.value, inverted)
+	return err
+}
+
+type rowOperationFreq func([]byte, []lsmkv.MapPair) (bool, error)
+
+func (rr *RowReaderFrequency) likeHelper(ctx context.Context, like *likeRegexp, c *lsmkv.CursorMap, rp rowOperationFreq) error {
 	var (
 		initialK []byte
 		initialV []lsmkv.MapPair
@@ -198,8 +235,9 @@ func (rr *RowReaderFrequency) like(ctx context.Context, readFn ReadFn) error {
 			continue
 		}
 
-		continueReading, err := readFn(k, rr.transformToBitmap(v))
-		if err != nil {
+		continueReading, err := readFn(k, rr.transformToBitmap(v), noopRelease)
+
+    if err != nil {
 			return err
 		}
 

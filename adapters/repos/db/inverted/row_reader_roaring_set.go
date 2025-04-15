@@ -19,6 +19,7 @@ import (
 	"github.com/weaviate/sroar"
 	"github.com/weaviate/weaviate/adapters/repos/db/lsmkv"
 	"github.com/weaviate/weaviate/adapters/repos/db/roaringset"
+	"github.com/weaviate/weaviate/entities/concurrency"
 	"github.com/weaviate/weaviate/entities/filters"
 )
 
@@ -66,7 +67,7 @@ func NewRowReaderRoaringSet(bucket *lsmkv.Bucket, value []byte, operator filters
 // The boolean return argument is a way to stop iteration (e.g. when a limit is
 // reached) without producing an error. In normal operation always return true,
 // if false is returned once, the loop is broken.
-type ReadFn func(k []byte, v *sroar.Bitmap) (bool, error)
+type ReadFn func(k []byte, v *sroar.Bitmap, release func()) (bool, error)
 
 // Read a row using the specified ReadFn. If RowReader was created with
 // keysOnly==true, the values argument in the readFn will always be nil on all
@@ -87,6 +88,8 @@ func (rr *RowReaderRoaringSet) Read(ctx context.Context, readFn ReadFn) error {
 		return rr.lessThan(ctx, readFn, true)
 	case filters.OperatorLike:
 		return rr.like(ctx, readFn)
+	case filters.OperatorNotLike:
+		return rr.notLike(ctx, readFn)
 	default:
 		return fmt.Errorf("operator %v not supported", rr.operator)
 	}
@@ -102,7 +105,7 @@ func (rr *RowReaderRoaringSet) equal(ctx context.Context,
 		return err
 	}
 
-	_, err = readFn(rr.value, v)
+	_, err = readFn(rr.value, v, noopRelease)
 	return err
 }
 
@@ -114,9 +117,9 @@ func (rr *RowReaderRoaringSet) notEqual(ctx context.Context,
 		return err
 	}
 
-	inverted := rr.bitmapFactory.GetBitmap()
-	inverted.AndNot(v)
-	_, err = readFn(rr.value, inverted)
+	inverted, release := rr.bitmapFactory.GetBitmap()
+	inverted.AndNotConc(v, concurrency.SROAR_MERGE)
+	_, err = readFn(rr.value, inverted, release)
 	return err
 }
 
@@ -137,7 +140,7 @@ func (rr *RowReaderRoaringSet) greaterThan(ctx context.Context,
 			continue
 		}
 
-		if continueReading, err := readFn(k, v); err != nil {
+		if continueReading, err := readFn(k, v, noopRelease); err != nil {
 			return err
 		} else if !continueReading {
 			break
@@ -165,7 +168,7 @@ func (rr *RowReaderRoaringSet) lessThan(ctx context.Context,
 			continue
 		}
 
-		if continueReading, err := readFn(k, v); err != nil {
+		if continueReading, err := readFn(k, v, noopRelease); err != nil {
 			return err
 		} else if !continueReading {
 			break
@@ -186,6 +189,40 @@ func (rr *RowReaderRoaringSet) like(ctx context.Context,
 	c := rr.newCursor()
 	defer c.Close()
 
+	return rr.likeHelper(ctx, like, c, func(k []byte, v *sroar.Bitmap) (bool, error) {
+		return readFn(k, v)
+	})
+}
+
+func (rr *RowReaderRoaringSet) notLike(ctx context.Context,
+	readFn ReadFn,
+) error {
+	like, err := parseLikeRegexp(rr.value)
+	if err != nil {
+		return fmt.Errorf("parse notLike value: %w", err)
+	}
+
+	c := rr.newCursor()
+	defer c.Close()
+
+	likeMap := sroar.NewBitmap()
+	if err := rr.likeHelper(ctx, like, c, func(k []byte, v *sroar.Bitmap) (bool, error) {
+		likeMap.Or(v)
+		return true, nil
+	}); err != nil {
+		return err
+	}
+
+	// Invert the Equal results for an efficient NotEqual
+	inverted := rr.bitmapFactory.GetBitmap()
+	inverted.AndNot(likeMap)
+	_, err = readFn(rr.value, inverted)
+	return err
+}
+
+type rowOperationRoaringSet func([]byte, *sroar.Bitmap) (bool, error)
+
+func (rr *RowReaderRoaringSet) likeHelper(ctx context.Context, like *likeRegexp, c lsmkv.CursorRoaringSet, rp rowOperationRoaringSet) error {
 	var (
 		initialK   []byte
 		initialV   *sroar.Bitmap
@@ -220,7 +257,7 @@ func (rr *RowReaderRoaringSet) like(ctx context.Context,
 			continue
 		}
 
-		if continueReading, err := readFn(k, v); err != nil {
+		if continueReading, err := readFn(k, v, noopRelease); err != nil {
 			return err
 		} else if !continueReading {
 			break
